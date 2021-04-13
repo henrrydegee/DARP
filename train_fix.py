@@ -86,7 +86,7 @@ if args.manualSeed is None:
 np.random.seed(args.manualSeed)
 
 best_acc = 0  # best test accuracy
-num_class = 10
+num_class = 10 # CIFAR-10
 
 def main():
     global best_acc
@@ -110,9 +110,10 @@ def main():
                                             drop_last=True)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
-    # Model
+    # Model (Wide ResNet model)
     print("==> creating WRN-28-2")
 
+    # Used for Fix Match
     def create_model(ema=False):
         model = models.WRN(2, num_class)
         model = model.cuda()
@@ -132,7 +133,7 @@ def main():
     train_criterion = SemiLoss()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    ema_optimizer= WeightEMA(model, ema_model, alpha=args.ema_decay)
+    ema_optimizer= WeightEMA(model, ema_model, alpha=args.ema_decay) # Exponential Moving Avg
     start_epoch = 0
 
     # Resume
@@ -230,6 +231,8 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
 
     model.train()
     for batch_idx in range(args.val_iteration):
+
+        # Prepare labeled and unlabled Batches
         try:
             inputs_x, targets_x, _ = labeled_train_iter.next()
         except:
@@ -283,21 +286,33 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
                     # Using previously saved pseudo-labels
                     targets_u = pseudo_refine[idx_u].cuda()
 
+
+        # Fix Match / DARP ? Still yet to be explored
         max_p, p_hat = torch.max(targets_u, dim=1)
         p_hat = torch.zeros(batch_size, num_class).cuda().scatter_(1, p_hat.view(-1, 1), 1)
 
+        # Refer to Fix Match (Supplement B2)
         select_mask = max_p.ge(args.tau)
         select_mask = torch.cat([select_mask, select_mask], 0).float()
 
+        # Q: Why do we need inputs_u2 when select_mask is clearly repeated?
+        # A: We assume delta/alpha hyperparameter = 2
+        # This means we double the allowed dataset instead of clipping
+        # Part of Refinement
         all_inputs = torch.cat([inputs_x, inputs_u2, inputs_u3], dim=0)
         all_targets = torch.cat([targets_x, p_hat, p_hat], dim=0)
 
+        # Forward Fix Match
+        # Assumption -> Ideally Supervised and Unsupervised
+        # are balanced on their own right 
+        # DARP tries to alleviate this issue
         all_outputs, _ = model(all_inputs)
         logits_x = all_outputs[:batch_size]
         logits_u = all_outputs[batch_size:]
 
+        # SemiLoss()
         Lx, Lu = criterion(logits_x, all_targets[:batch_size], logits_u, all_targets[batch_size:], select_mask)
-        loss = Lx + Lu
+        loss = Lx + Lu  # Assume Regularization lambda_u = 1 (Treat Unsupervised = Supervised)
 
         # record loss
         losses.update(loss.item(), inputs_x.size(0))
@@ -428,6 +443,7 @@ def estimate_pseudo(q_y, saved_q):
 def f(x, a, b, c, d):
     return np.sum(a * b * np.exp(-1 * x/c)) - d
 
+# To solve KL-Divergence Objective using Newton's Method
 def opt_solver(probs, target_distb, num_iter=args.iter_T, num_newton=30):
     entropy = (-1 * probs * torch.log(probs + 1e-6)).sum(1)
     weights = (1 / entropy)
@@ -490,6 +506,7 @@ class SemiLoss(object):
 
         return Lx, Lu
 
+# Weighted Exponential Moving Average
 class WeightEMA(object):
     def __init__(self, model, ema_model, alpha=0.999):
         self.model = model
