@@ -64,6 +64,7 @@ parser.add_argument('--num_val', type=int, default=10,
 # Hyperparameters for FixMatch
 parser.add_argument('--tau', default=0.95, type=float, help='hyper-parameter for pseudo-label of FixMatch')
 parser.add_argument('--ema-decay', default=0.999, type=float)
+parser.add_argument('--lambda_u', default=1, type=float, help='Weight-parameter for Unsupervised Loss')
 
 # Hyperparameters for DARP
 parser.add_argument('--warm', type=int, default=200,  help='Number of warm up epoch for DARP')
@@ -101,7 +102,7 @@ def main():
     U_SAMPLES_PER_CLASS = make_imb_data(args.ratio * args.num_max, num_class, args.imb_ratio_u)
     N_SAMPLES_PER_CLASS_T = torch.Tensor(N_SAMPLES_PER_CLASS)
 
-    train_labeled_set, train_unlabeled_set, test_set = dataset.get_cifar10('/home/jaehyung/data', N_SAMPLES_PER_CLASS,
+    train_labeled_set, train_unlabeled_set, test_set = dataset.get_cifar10('/root/data', N_SAMPLES_PER_CLASS,
                                                                                     U_SAMPLES_PER_CLASS)
 
     labeled_trainloader = data.DataLoader(train_labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=4,
@@ -151,7 +152,8 @@ def main():
         logger = Logger(os.path.join(args.out, 'log.txt'), title=title, resume=True)
     else:
         logger = Logger(os.path.join(args.out, 'log.txt'), title=title)
-        logger.set_names(['Train Loss', 'Train Loss X', 'Train Loss U', 'Test Loss', 'Test Acc.', 'Test GM.'])
+        logger.set_names(['Train Loss', 'Train Loss X', 'Train Loss U',  \
+             'Test Loss', 'Test Acc.', 'Test GM.'])
 
     test_accs = []
     test_gms = []
@@ -160,6 +162,15 @@ def main():
     emp_distb_u = torch.ones(num_class) / num_class
     pseudo_orig = torch.ones(len(train_unlabeled_set.targets), num_class) / num_class
     pseudo_refine = torch.ones(len(train_unlabeled_set.targets), num_class) / num_class
+
+    # Lambda_u scheduler
+    prev_train_loss = 10000
+    lambda_u = args.lambda_u
+    
+    # Weighted loss based on Class Distribution (for Unsupervised)
+    class_weight_u = torch.ones(10)
+    if use_cuda :
+        class_weight_u = class_weight_u.cuda()
 
     # Main function
     for epoch in range(start_epoch, args.epochs):
@@ -177,20 +188,40 @@ def main():
         # In case of FixMatch, labeled data is utilized as unlabeled data once again.
         target_disb += N_SAMPLES_PER_CLASS_T
 
+        # print("Target Distribution = ", target_disb)
+
         # Training part
-        train_loss, train_loss_x, train_loss_u, emp_distb_u, pseudo_orig, pseudo_refine = train(labeled_trainloader,
-                                                                                                unlabeled_trainloader,
-                                                                                                model, optimizer,
-                                                                                                ema_optimizer,
-                                                                                                train_criterion,
-                                                                                                epoch, use_cuda,
-                                                                                                target_disb, emp_distb_u,
-                                                                                                pseudo_orig, pseudo_refine)
+        train_loss, train_loss_x, train_loss_u, emp_distb_u, \
+             pseudo_orig, pseudo_refine, model_distb_u =    train(labeled_trainloader,
+                                                                unlabeled_trainloader,
+                                                                model, optimizer,
+                                                                ema_optimizer,
+                                                                train_criterion,
+                                                                epoch, use_cuda,
+                                                                target_disb, emp_distb_u,
+                                                                pseudo_orig, pseudo_refine,
+                                                                lambda_u, class_weight_u)
+
+        # print("Emperical Distribution of Unsupervised = ", emp_distb_u)
+        # print("Pseudo_Original Shape = ", pseudo_orig.shape) # torch.Size([11163, 10])
+        # print("Pseudo Refined Shape = ", pseudo_refine.shape) # torch.Size([11163, 10])
+        
+        # Calculate Weighted Loss on Class Distribution
+        # for next epoch's Unsupervised Data
+        class_weight_u = model_distb_u / torch.sum(model_distb_u) * 2 + 1
+        print("Weights = ", class_weight_u)
+
+        # For Next Epoch
+        # if (abs(prev_train_loss / train_loss) < 1.05) :
+        #     lambda_u * 1.1
+
 
         # Evaluation part
         test_loss, test_acc, test_cls, test_gm = validate(test_loader, ema_model, criterion, use_cuda, mode='Test Stats ')
 
         # Append logger file
+        # str_distb_u = model_distb_u.cpu().detach().numpy()
+        # str_distb_u = str_distb_u.tostring()
         logger.append([train_loss, train_loss_x, train_loss_u, test_loss, test_acc, test_gm])
 
         # Save models
@@ -217,7 +248,7 @@ def main():
 
 
 def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, criterion, epoch, use_cuda,
-          target_disb, emp_distb_u, pseudo_orig, pseudo_refine):
+          target_disb, emp_distb_u, pseudo_orig, pseudo_refine, lambda_u, class_weight_u):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -228,6 +259,10 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
     bar = Bar('Training', max=args.val_iteration)
     labeled_train_iter = iter(labeled_trainloader)
     unlabeled_train_iter = iter(unlabeled_trainloader)
+
+    output_u_all = torch.FloatTensor([])
+    if use_cuda :
+        output_u_all = output_u_all.cuda()
 
     model.train()
     for batch_idx in range(args.val_iteration):
@@ -288,7 +323,8 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
 
 
         # Fix Match / DARP ? Still yet to be explored
-        max_p, p_hat = torch.max(targets_u, dim=1)
+        # A: Fix Match
+        max_p, p_hat = torch.max(targets_u, dim=1)      # Choose Class according to Highest Prediction
         p_hat = torch.zeros(batch_size, num_class).cuda().scatter_(1, p_hat.view(-1, 1), 1)
 
         # Refer to Fix Match (Supplement B2)
@@ -300,7 +336,8 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         # This means we double the allowed dataset instead of clipping
         # Part of Refinement
         all_inputs = torch.cat([inputs_x, inputs_u2, inputs_u3], dim=0)
-        all_targets = torch.cat([targets_x, p_hat, p_hat], dim=0)
+        all_targets = torch.cat([targets_x, p_hat, p_hat], dim=0) # PyTorch Float32
+        # print("all_targets = ", all_targets.dtype)
 
         # Forward Fix Match
         # Assumption -> Ideally Supervised and Unsupervised
@@ -308,11 +345,22 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         # DARP tries to alleviate this issue
         all_outputs, _ = model(all_inputs)
         logits_x = all_outputs[:batch_size]
-        logits_u = all_outputs[batch_size:]
+        logits_u = all_outputs[batch_size:] # torch.Size([128, 10])
+        output_u_all = torch.cat([output_u_all, logits_u], dim=0)
+        # print("logits_u = ", logits_u) # Prediction numbers to be maxed out for one-hot encoding
+
+        # Loss Directly Proportional to Class Distribution
+        # tester = torch.FloatTensor([2,3,2,2,2,2,2,2,3,3]).cuda()
+        # print("Before = ", logits_u)
+        # print("Net = ", logits_u * tester)
+        # weighted_u = logits_u * class_weight_u
 
         # SemiLoss()
-        Lx, Lu = criterion(logits_x, all_targets[:batch_size], logits_u, all_targets[batch_size:], select_mask)
-        loss = Lx + Lu  # Assume Regularization lambda_u = 1 (Treat Unsupervised = Supervised)
+        Lx, Lu = criterion(logits_x, all_targets[:batch_size], \
+            logits_u, all_targets[batch_size:], select_mask, class_weight_u)
+        # print("select_mask shape = ", select_mask.size()) # torch.Size([128])
+        # print("Shape Fu = ", Fu.size()) # torch.Size([128])
+        loss = Lx + (lambda_u * Lu)  # Normally assume Regularization lambda_u = 1 (Treat Unsupervised = Supervised)
 
         # record loss
         losses.update(loss.item(), inputs_x.size(0))
@@ -345,7 +393,21 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         bar.next()
     bar.finish()
 
-    return (losses.avg, losses_x.avg, losses_u.avg, emp_distb_u, pseudo_orig, pseudo_refine)
+    output_u_all = torch.softmax(output_u_all, dim=1)
+    values, indices = torch.max(output_u_all, dim=1)
+    # indices = indices.cpu()
+    # Transform label to one-hot
+    if use_cuda :
+        indices_oneHot = torch.zeros(2*batch_size*args.val_iteration,  \
+            num_class).cuda().scatter_(1, indices.view(-1,1), 1)
+    else :
+        indices_oneHot = torch.zeros(2*batch_size*args.val_iteration,  \
+            num_class).scatter_(1, indices.view(-1,1), 1)
+    
+    model_distb_u = torch.sum(indices_oneHot, dim=0)
+    # print("Shape of Total Unsupervised Outputs =  ", output_u_all) # torch.Size([64000 (128*500), 10])
+    print("Distribution (Unsupervised) = ", model_distb_u)
+    return (losses.avg, losses_x.avg, losses_u.avg, emp_distb_u, pseudo_orig, pseudo_refine, model_distb_u)
 
 def validate(valloader, model, criterion, use_cuda, mode):
 
@@ -500,9 +562,15 @@ def linear_rampup(current, rampup_length=args.epochs):
         return float(current)
 
 class SemiLoss(object):
-    def __call__(self, outputs_x, targets_x, outputs_u, targets_u, mask):
+    def __call__(self, outputs_x, targets_x, outputs_u, targets_u, mask, weights_u):
         Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
-        Lu = -torch.mean(torch.sum(F.log_softmax(outputs_u, dim=1) * targets_u, dim=1) * mask)
+
+        CE_u = F.log_softmax(outputs_u, dim=1) * targets_u # Cross-Entropy Unsupervised, torch.Size([128, 10]
+        # print("CE_u shape = ", CE_u.shape)
+        WCE_u = CE_u * weights_u     # Weighted Cross-Entropy
+        MCE_u = torch.sum(WCE_u, dim=1) * mask     # Masked Cross-Entropy based on Quality, torch.Size([128])
+        # print("Before Average Shape = ", MCE_u.shape) # 
+        Lu = -torch.mean(MCE_u)     # Final Unsupervised Cross-Entropy Loss
 
         return Lx, Lu
 
