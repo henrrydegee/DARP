@@ -74,6 +74,9 @@ parser.add_argument('--est', action='store_true', help='Using estimated distribu
 parser.add_argument('--iter_T', type=int, default=10, help='Number of iteration (T) for DARP')
 parser.add_argument('--num_iter', type=int, default=10, help='Scheduling for updating pseudo-labels')
 
+# Weights for Model's Cost Function
+parser.add_argument('--dynamic', action='store_false', help='Applying Weights to Loss according to Class Distribution')
+
 args = parser.parse_args()
 state = {k: v for k, v in args._get_kwargs()}
 
@@ -192,15 +195,15 @@ def main():
 
         # Training part
         train_loss, train_loss_x, train_loss_u, emp_distb_u, \
-             pseudo_orig, pseudo_refine, model_distb_u =    train(labeled_trainloader,
-                                                                unlabeled_trainloader,
-                                                                model, optimizer,
-                                                                ema_optimizer,
-                                                                train_criterion,
-                                                                epoch, use_cuda,
-                                                                target_disb, emp_distb_u,
-                                                                pseudo_orig, pseudo_refine,
-                                                                lambda_u, class_weight_u)
+             pseudo_orig, pseudo_refine, pseudo_distb_u , model_distb_u =    train(labeled_trainloader,
+                                                                                unlabeled_trainloader,
+                                                                                model, optimizer,
+                                                                                ema_optimizer,
+                                                                                train_criterion,
+                                                                                epoch, use_cuda,
+                                                                                target_disb, emp_distb_u,
+                                                                                pseudo_orig, pseudo_refine,
+                                                                                lambda_u, class_weight_u)
 
         # print("Emperical Distribution of Unsupervised = ", emp_distb_u)
         # print("Pseudo_Original Shape = ", pseudo_orig.shape) # torch.Size([11163, 10])
@@ -208,7 +211,13 @@ def main():
         
         # Calculate Weighted Loss on Class Distribution
         # for next epoch's Unsupervised Data
-        class_weight_u = model_distb_u / torch.sum(model_distb_u) * 2 + 1
+        # Keep Weight Base as 1 (ie +1)
+        # Use the Sqrt/ cube root of Distribution for the weighting
+        # class_weight_u = model_distb_u / torch.sum(model_distb_u) * 2 + 1 # Based on Proportion to Sum of all Dataset
+        lowest_ref = torch.min(pseudo_distb_u)
+        if (lowest_ref < 1) :
+            lowest_ref = 1
+        class_weight_u = (pseudo_distb_u / lowest_ref) ** (1/3) # Based on Proportion to Lowest Minority Class (Smallest = 1)
         print("Weights = ", class_weight_u)
 
         # For Next Epoch
@@ -260,9 +269,12 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
     labeled_train_iter = iter(labeled_trainloader)
     unlabeled_train_iter = iter(unlabeled_trainloader)
 
+    # Collect Class Distribution per epoch
     output_u_all = torch.FloatTensor([])
+    p_hat_all = torch.FloatTensor([])
     if use_cuda :
         output_u_all = output_u_all.cuda()
+        p_hat_all = p_hat_all.cuda()
 
     model.train()
     for batch_idx in range(args.val_iteration):
@@ -299,9 +311,11 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
             # Update the saved predictions with current one
             pseudo_orig[idx_u, :] = targets_u.data.cpu()
             pseudo_orig_backup = pseudo_orig.clone()
+            # print("Checking for DARP")
 
             # Applying DARP
             if args.darp and epoch > args.warm:
+                # print("Applying DARP...")
                 if batch_idx % args.num_iter == 0:
                     # Iterative normalization
                     targets_u, weights_u = estimate_pseudo(target_disb, pseudo_orig)
@@ -326,6 +340,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         # A: Fix Match
         max_p, p_hat = torch.max(targets_u, dim=1)      # Choose Class according to Highest Prediction
         p_hat = torch.zeros(batch_size, num_class).cuda().scatter_(1, p_hat.view(-1, 1), 1)
+        p_hat_all = torch.cat([p_hat_all, p_hat], dim=0)
 
         # Refer to Fix Match (Supplement B2)
         select_mask = max_p.ge(args.tau)
@@ -393,6 +408,11 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         bar.next()
     bar.finish()
 
+    # To obtain Class Distribution based on Model Prediction
+    # Note: Should use the Pseudo-label Distribution 
+    # instead of Model Prediction Distribution 
+    # (ie logits_u -> targets_u / p_hat)
+    #
     output_u_all = torch.softmax(output_u_all, dim=1)
     values, indices = torch.max(output_u_all, dim=1)
     # indices = indices.cpu()
@@ -405,9 +425,15 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
             num_class).scatter_(1, indices.view(-1,1), 1)
     
     model_distb_u = torch.sum(indices_oneHot, dim=0)
-    # print("Shape of Total Unsupervised Outputs =  ", output_u_all) # torch.Size([64000 (128*500), 10])
     print("Distribution (Unsupervised) = ", model_distb_u)
-    return (losses.avg, losses_x.avg, losses_u.avg, emp_distb_u, pseudo_orig, pseudo_refine, model_distb_u)
+    # # end
+
+    pseudo_distb_u = torch.sum(p_hat_all, dim=0)
+    print("Distribution (Pseudo-Label) = ", pseudo_distb_u)
+    # print("Shape of Total Unsupervised Outputs =  ", output_u_all) # torch.Size([64000 (128*500), 10])
+    
+    return (losses.avg, losses_x.avg, losses_u.avg, emp_distb_u, \
+         pseudo_orig, pseudo_refine, pseudo_distb_u, model_distb_u)
 
 def validate(valloader, model, criterion, use_cuda, mode):
 
