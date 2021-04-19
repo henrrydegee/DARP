@@ -25,7 +25,7 @@ import dataset.fix_cifar10 as dataset
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from scipy import optimize
 
-parser = argparse.ArgumentParser(description='PyTorch ReMixMatch Training')
+parser = argparse.ArgumentParser(description='PyTorch FixMixMatch Training')
 # Optimization options
 parser.add_argument('--epochs', default=500, type=int, metavar='N',
                     help='number of total epochs to run')
@@ -75,7 +75,14 @@ parser.add_argument('--iter_T', type=int, default=10, help='Number of iteration 
 parser.add_argument('--num_iter', type=int, default=10, help='Scheduling for updating pseudo-labels')
 
 # Weights for Model's Cost Function
-parser.add_argument('--dynamic', action='store_false', help='Applying Weights to Loss according to Class Distribution')
+parser.add_argument('--w_L', choices=["", "default", "total", "minority"], help='Applying Weights to Loss: \
+    \n (default/blank) = Uniform Weight of Ones \
+    \n total = Class Distribution / Total Class Distribution : [1, 3] \
+    \n minority = Class Distribution / Minority Class Distribution : [1, inf]')
+parser.add_argument('--distb', choices=["", "default", "pseudo", "output"], help='Applying Weights to Loss \
+    \n (default/blank) = Uniform Weight of Ones \
+    \n pseudo = Using Pseudo-Label Class Distribution \
+    \n output = Using Output Model Class Distribution ')
 
 args = parser.parse_args()
 state = {k: v for k, v in args._get_kwargs()}
@@ -152,11 +159,46 @@ def main():
         model.load_state_dict(checkpoint['state_dict'])
         ema_model.load_state_dict(checkpoint['ema_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
+        
+        # Weighted loss based on Class Distribution (for Unsupervised)
+        class_weight_u = checkpoint['class_weight_u']
+        distbLoss = checkpoint['distribution']
+        weightLoss = checkpoint['weightLoss']
+
+        # Print Settings
+        print("Starting Epoch: ", start_epoch)
+        print("For Weight Loss based on Class Distribution: ")
+        print("Class Distribution: ", distbLoss)
+        print("Weighting Formula:  ", weightLoss)
+
+        # Load Logger
         logger = Logger(os.path.join(args.out, 'log.txt'), title=title, resume=True)
+        pseudoLogger = Logger(os.path.join(args.out, 'pseudo_distb.txt'), \
+            title=title+" Pseudo-Label (p_hat) Distribution", resume=True)
+        outputLogger = Logger(os.path.join(args.out, 'output_distb.txt'), \
+            title=title+" Output Prediction (q) Distribution", resume=True)
     else:
+        # Settings for Weighted loss based on Class Distribution (for Unsupervised)
+        class_weight_u = torch.ones(num_class)
+        if use_cuda :
+            class_weight_u = class_weight_u.cuda()
+        
+        distbLoss = args.distb
+        weightLoss = args.w_L
+        
+        # Create Logger
         logger = Logger(os.path.join(args.out, 'log.txt'), title=title)
         logger.set_names(['Train Loss', 'Train Loss X', 'Train Loss U',  \
              'Test Loss', 'Test Acc.', 'Test GM.'])
+
+        pseudoLogger = Logger(os.path.join(args.out, 'pseudo_distb.txt'), title=title)
+        pseudoLogger.set_names(['0-Majority', '1', '2', '3', '4', '5', \
+            '6', '7', '8', '9-Minority'])
+        outputLogger = Logger(os.path.join(args.out, 'output_distb.txt'), title=title)
+        outputLogger.set_names(['0-Majority', '1', '2', '3', '4', '5', \
+            '6', '7', '8', '9-Minority'])
+
+        
 
     test_accs = []
     test_gms = []
@@ -170,10 +212,7 @@ def main():
     prev_train_loss = 10000
     lambda_u = args.lambda_u
     
-    # Weighted loss based on Class Distribution (for Unsupervised)
-    class_weight_u = torch.ones(10)
-    if use_cuda :
-        class_weight_u = class_weight_u.cuda()
+    
 
     # Main function
     for epoch in range(start_epoch, args.epochs):
@@ -213,11 +252,22 @@ def main():
         # for next epoch's Unsupervised Data
         # Keep Weight Base as 1 (ie +1)
         # Use the Sqrt/ cube root of Distribution for the weighting
-        # class_weight_u = model_distb_u / torch.sum(model_distb_u) * 2 + 1 # Based on Proportion to Sum of all Dataset
-        lowest_ref = torch.min(pseudo_distb_u)
-        if (lowest_ref < 1) :
-            lowest_ref = 1
-        class_weight_u = (pseudo_distb_u / lowest_ref) ** (1/3) # Based on Proportion to Lowest Minority Class (Smallest = 1)
+
+        if (distbLoss == "pseudo") :
+            distb_u = pseudo_distb_u
+        elif (distbLoss == "output") :
+            distb_u = model_distb_u
+        else :
+            weightLoss = None
+
+        if (weightLoss == "total") :
+            class_weight_u = distb_u / torch.sum(distb_u) * 2 + 1 # Based on Proportion to Sum of all Dataset
+        elif (weightLoss == "minority") :
+            lowest_ref = torch.min(pseudo_distb_u)
+            if (lowest_ref < 1) :
+                lowest_ref = 1
+            class_weight_u = (distb_u / lowest_ref) ** (1/3) # Based on Proportion to Lowest Minority Class (Smallest = 1)
+        
         print("Weights = ", class_weight_u)
 
         # For Next Epoch
@@ -229,9 +279,17 @@ def main():
         test_loss, test_acc, test_cls, test_gm = validate(test_loader, ema_model, criterion, use_cuda, mode='Test Stats ')
 
         # Append logger file
-        # str_distb_u = model_distb_u.cpu().detach().numpy()
-        # str_distb_u = str_distb_u.tostring()
+        model_distb_u = model_distb_u.cpu().detach().tolist()
+        model_distb_u = [int(p) for p in model_distb_u]
+        pseudo_distb_u = pseudo_distb_u.cpu().detach().tolist()
+        pseudo_distb_u = [int(p) for p in pseudo_distb_u]
+        
         logger.append([train_loss, train_loss_x, train_loss_u, test_loss, test_acc, test_gm])
+        outputLogger.append(model_distb_u)
+        pseudoLogger.append(pseudo_distb_u)
+
+        del model_distb_u
+        del pseudo_distb_u
 
         # Save models
         save_checkpoint({
@@ -239,11 +297,16 @@ def main():
             'state_dict': model.state_dict(),
             'ema_state_dict': ema_model.state_dict(),
             'optimizer': optimizer.state_dict(),
+            'class_weight_u' : class_weight_u,
+            'distribution' : distbLoss,
+            'weightLoss' : weightLoss,
         }, epoch + 1)
         test_accs.append(test_acc)
         test_gms.append(test_gm)
 
     logger.close()
+    outputLogger.close()
+    pseudoLogger.close()
 
     # Print the final results
     print('Mean bAcc:')
@@ -340,7 +403,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         # A: Fix Match
         max_p, p_hat = torch.max(targets_u, dim=1)      # Choose Class according to Highest Prediction
         p_hat = torch.zeros(batch_size, num_class).cuda().scatter_(1, p_hat.view(-1, 1), 1)
-        p_hat_all = torch.cat([p_hat_all, p_hat], dim=0)
+        p_hat_all = torch.cat([p_hat_all, p_hat], dim=0) # Collect Pseudo-Labels
 
         # Refer to Fix Match (Supplement B2)
         select_mask = max_p.ge(args.tau)

@@ -82,6 +82,31 @@ else
 	exit 1
 fi
 
+echo -e "Enter a Port Number"
+read newPortNumber
+re='^[0-9]+$'
+if [ "$newPortNumber" = "" ] ; then
+        echo -e "Using Port $JUPYTERPORT for Docker Container. \n"
+elif ! [[ $newPortNumber =~ $re ]] ; then
+        echo -e "Unsupported Input, \
+        Please enter a suitable Port Number. Exiting... \n"
+        exit 1
+else
+        echo -e "Using Port $newPortNumber instead of $JUPYTERPORT..."
+        JUPYTERPORT=$newPortNumber
+fi
+
+echo -e "Enter New Container Name if needed to be replaced .\n\
+\tCurrent Container Name = $CONTNAME \n\
+Leave Blank to keep current Container Name"
+read newContName
+if [ "$newContName" = "" ] ; then
+        echo -e "Container Name: $CONTNAME \n"
+else
+        echo -e "Replacing Container Name $CONTNAME -> $newContName \n"
+        CONTNAME=$newContName
+fi
+
 echo -e ".......... Set up will start in 5 seconds .........."
 sleep 5
 
