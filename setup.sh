@@ -11,6 +11,8 @@ DOCKERFILEPATH="./docker/Dockerfile"
 FOLDERDIR="/home/hgunawan"
 REPONAME="DARP"
 JUPYTERPORT="3366"
+XPERIMENTDIR="/EEC193/DARP/experiments"
+
 cd "$SCRIPTPATH"
 
 test_retval() {
@@ -132,6 +134,7 @@ echo -e "\nBuilding a container $CONTNAME from the image $IMGNAME:$IMGTAG..."
 docker create -it --name=$CONTNAME --gpus=all \
 	-v "$SCRIPTPATH":/root/$REPONAME \
 	-v /tmp/.X11-unix:/tmp/.X11-unix \
+        -v $XPERIMENTDIR:/root/$REPONAME/experiments \
 	-e DISPLAY=$DISPLAY \
 	--ipc=host \
 	-p $JUPYTERPORT:$JUPYTERPORT \

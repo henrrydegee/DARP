@@ -1,9 +1,14 @@
 #!/bin/bash
 
+#########################################
+# SECTION 1: Variables                  #
+#########################################
+
 # Variables
-FOLDERNAME="result5"
-SETTINGTXT="${FOLDERNAME}/details.txt"
-PROGRESSTXT="${FOLDERNAME}/progress.txt"
+FOLDERNAME="result1"
+FOLDERDIR="experiments/${FOLDERNAME}"
+SETTINGTXT="${FOLDERDIR}/details.txt"
+PROGRESSTXT="${FOLDERDIR}/progress.txt"
 
 # Experiment Settings
 EPOCHS=500
@@ -39,7 +44,12 @@ DISTB="pseudo"
 
 # For More Info: Execute "python3 train_fix.py --help"
 
-mkdir $FOLDERNAME
+#########################################
+# SECTION 2: Print Receipt              #
+#########################################
+
+mkdir $FOLDERDIR
+mkdir "${FOLDERDIR}/checkpoints"
 # Print Settings for Reference
 echo -e \
 "Settings Used for $FOLDERNAME @ $(pwd) : \n \
@@ -112,13 +122,17 @@ if [ "$DISTB" = "pseudo" ] ; then
     echo -e "Class Distribution used  = Psuedo-Label (p_hat)" >> $SETTINGTXT
 elif [ "$DISTB" = "output" ] ; then
     echo -e "Class Distribution used  = Model Prediction (q / y_hat_u)"  >> $SETTINGTXT
-elif [ "$DISTB" = "" || $W_L = "" ] ; then
+elif [ "$DISTB" = "" || "$W_L" = "" ] ; then
     echo -e "No Class Distribution was used" >> $SETTINGTXT
 else
     echo -e "Error in DISTB Setting, Please Correct it. Exiting..." \
     | tee -a $SETTINGTXT
     exit 1
 fi
+
+#########################################
+# SECTION 3: Execute Experiments        #
+#########################################
 
 # Execute Experiment
 python3 train_fix.py \
@@ -148,7 +162,7 @@ $EST \
 --w_L $W_L \
 --distb $DISTB \
 \
---out $FOLDERNAME \
+--out $FOLDERDIR \
 \
 | tee $PROGRESSTXT
 

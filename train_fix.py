@@ -637,6 +637,15 @@ def make_imb_data(max_num, class_num, gamma):
     return list(class_num_list)
 
 def save_checkpoint(state, epoch, checkpoint=args.out, filename='checkpoint.pth.tar'):
+    
+    if int(epoch / 100) > 1 :
+        new_filename = str(epoch) + "_" + filename
+        file_loc = "checkpoints/" + new_filename
+        filepath = os.path.join(checkpoint, file_loc)
+        torch.save(state, filepath)
+        print("Saved Epoch at: ", filepath)
+
+    # Original Code
     filepath = os.path.join(checkpoint, filename)
     torch.save(state, filepath)
 

@@ -46,6 +46,7 @@ RUN pip3 install -U numpy cython ipython \
     scikit-image scipy tqdm pyvips
 
 RUN pip3 install torch==1.1.0 torchvision
+RUN pip3 install progress
 
 # Install randAugment
 RUN pip3 install git+https://github.com/ildoonet/pytorch-randaugment
