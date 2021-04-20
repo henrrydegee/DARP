@@ -117,9 +117,23 @@ def main():
 
     labeled_trainloader = data.DataLoader(train_labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=4,
                                           drop_last=True)
+
+    tuple_set = iter(labeled_trainloader)
+    image, label, index = tuple_set.next()
+    print("Image: ", image)
+    print("Label: ", label)
+    print("Index: ", index)
     unlabeled_trainloader = data.DataLoader(train_unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=4,
                                             drop_last=True)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=4)
+
+    tuple_set = iter(unlabeled_trainloader)
+    (u1, u2, u3), label, index = tuple_set.next()
+    print("u1 Shape: ", u1.shape)
+    print("u2 Shape: ", u2.shape)
+    print("u3 Shape: ", u3.shape)
+    print("Label: ", label)
+    print("Index: ", index)
 
     # Model (Wide ResNet model)
     print("==> creating WRN-28-2")
@@ -244,17 +258,31 @@ def main():
                                                                                 pseudo_orig, pseudo_refine,
                                                                                 lambda_u, class_weight_u)
 
+        # Use Pseudo_orig as the Class Distribution (Take Note of this!!!)
+        # Note: Pseudo_refine is used for DARP (if Not, do not need)
         # print("Emperical Distribution of Unsupervised = ", emp_distb_u)
-        # print("Pseudo_Original Shape = ", pseudo_orig.shape) # torch.Size([11163, 10])
-        # print("Pseudo Refined Shape = ", pseudo_refine.shape) # torch.Size([11163, 10])
+        # print("Pseudo_Original Shape = ", pseudo_orig.shape) # torch.Size([11163, 10]) # This is fine
+        # print("Pseudo Refined Shape = ", pseudo_refine.shape) # torch.Size([11163, 10]) # This is fine
         
+        print("Pseudo Output: ", pseudo_orig)
+        maxValue, pseudo_labels = torch.max(pseudo_orig, dim=1)
+        pseudo_labels = pseudo_labels.cuda()
+        size = pseudo_labels.shape[0]
+        print("Length of Pseudo Labels: ", size)
+        pseudo_labels = torch.zeros(size, num_class).cuda().scatter_(1, pseudo_labels.view(-1, 1), 1)
+        print("Pseudo Labels: ", pseudo_labels)
+        print("Pseudo Labels Shape: ", pseudo_labels.shape)
+        pseudo_distribution = torch.sum(pseudo_labels, dim=0)
+        print("Pseudo-Label Distribution = ", pseudo_distribution)
+
         # Calculate Weighted Loss on Class Distribution
         # for next epoch's Unsupervised Data
         # Keep Weight Base as 1 (ie +1)
         # Use the Sqrt/ cube root of Distribution for the weighting
 
         if (distbLoss == "pseudo") :
-            distb_u = pseudo_distb_u
+            # distb_u = pseudo_distb_u  # Wrong Counting
+            distb_u = pseudo_distribution # -> Use this instead to update the weighting scheme 
         elif (distbLoss == "output") :
             distb_u = model_distb_u
         else :
@@ -281,15 +309,20 @@ def main():
         # Append logger file
         model_distb_u = model_distb_u.cpu().detach().tolist()
         model_distb_u = [int(p) for p in model_distb_u]
-        pseudo_distb_u = pseudo_distb_u.cpu().detach().tolist()
-        pseudo_distb_u = [int(p) for p in pseudo_distb_u]
+        # pseudo_distb_u = pseudo_distb_u.cpu().detach().tolist() # Wrong Counting
+        # pseudo_distb_u = [int(p) for p in pseudo_distb_u]     # Wrong Counting
+
+        pseudo_distribution = pseudo_distribution.cpu().detach().tolist()
+        pseudo_distribution = [int(p) for p in pseudo_distribution]
         
         logger.append([train_loss, train_loss_x, train_loss_u, test_loss, test_acc, test_gm])
         outputLogger.append(model_distb_u)
-        pseudoLogger.append(pseudo_distb_u)
+        # pseudoLogger.append(pseudo_distb_u) # Wrong Counting
+        pseudoLogger.append(pseudo_distbribution)
 
         del model_distb_u
-        del pseudo_distb_u
+        # del pseudo_distb_u # Wrong Counting
+        del pseudo_distbribution
 
         # Save models
         save_checkpoint({
@@ -334,10 +367,10 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
 
     # Collect Class Distribution per epoch
     output_u_all = torch.FloatTensor([])
-    p_hat_all = torch.FloatTensor([])
+    # p_hat_all = torch.FloatTensor([]) # Wrong Count
     if use_cuda :
         output_u_all = output_u_all.cuda()
-        p_hat_all = p_hat_all.cuda()
+        # p_hat_all = p_hat_all.cuda() # Wrong Count
 
     model.train()
     for batch_idx in range(args.val_iteration):
@@ -491,8 +524,10 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
     print("Distribution (Unsupervised) = ", model_distb_u)
     # # end
 
-    pseudo_distb_u = torch.sum(p_hat_all, dim=0)
-    print("Distribution (Pseudo-Label) = ", pseudo_distb_u)
+    
+
+    # pseudo_distb_u = torch.sum(p_hat_all, dim=0)
+    # print("Distribution (Pseudo-Label) = ", pseudo_distb_u)
     # print("Shape of Total Unsupervised Outputs =  ", output_u_all) # torch.Size([64000 (128*500), 10])
     
     return (losses.avg, losses_x.avg, losses_u.avg, emp_distb_u, \
