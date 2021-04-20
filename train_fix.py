@@ -118,22 +118,9 @@ def main():
     labeled_trainloader = data.DataLoader(train_labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=4,
                                           drop_last=True)
 
-    tuple_set = iter(labeled_trainloader)
-    image, label, index = tuple_set.next()
-    print("Image: ", image)
-    print("Label: ", label)
-    print("Index: ", index)
     unlabeled_trainloader = data.DataLoader(train_unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=4,
                                             drop_last=True)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=4)
-
-    tuple_set = iter(unlabeled_trainloader)
-    (u1, u2, u3), label, index = tuple_set.next()
-    print("u1 Shape: ", u1.shape)
-    print("u2 Shape: ", u2.shape)
-    print("u3 Shape: ", u3.shape)
-    print("Label: ", label)
-    print("Index: ", index)
 
     # Model (Wide ResNet model)
     print("==> creating WRN-28-2")
@@ -188,7 +175,7 @@ def main():
         # Load Logger
         logger = Logger(os.path.join(args.out, 'log.txt'), title=title, resume=True)
         pseudoLogger = Logger(os.path.join(args.out, 'pseudo_distb.txt'), \
-            title=title+" Pseudo-Label (p_hat) Distribution", resume=True)
+            title=title+" Pseudo-Label (p) Distribution", resume=True)
         outputLogger = Logger(os.path.join(args.out, 'output_distb.txt'), \
             title=title+" Output Prediction (q) Distribution", resume=True)
     else:
@@ -206,11 +193,11 @@ def main():
              'Test Loss', 'Test Acc.', 'Test GM.'])
 
         pseudoLogger = Logger(os.path.join(args.out, 'pseudo_distb.txt'), title=title)
-        pseudoLogger.set_names(['0-Majority', '1', '2', '3', '4', '5', \
-            '6', '7', '8', '9-Minority'])
+        pseudoLogger.set_names(['0-Major', '1', '2', '3', '4', '5', \
+            '6', '7', '8', '9-Minor'])
         outputLogger = Logger(os.path.join(args.out, 'output_distb.txt'), title=title)
-        outputLogger.set_names(['0-Majority', '1', '2', '3', '4', '5', \
-            '6', '7', '8', '9-Minority'])
+        outputLogger.set_names(['0-Major', '1', '2', '3', '4', '5', \
+            '6', '7', '8', '9-Minor'])
 
         
 
@@ -263,17 +250,6 @@ def main():
         # print("Emperical Distribution of Unsupervised = ", emp_distb_u)
         # print("Pseudo_Original Shape = ", pseudo_orig.shape) # torch.Size([11163, 10]) # This is fine
         # print("Pseudo Refined Shape = ", pseudo_refine.shape) # torch.Size([11163, 10]) # This is fine
-        
-        print("Pseudo Output: ", pseudo_orig)
-        maxValue, pseudo_labels = torch.max(pseudo_orig, dim=1)
-        pseudo_labels = pseudo_labels.cuda()
-        size = pseudo_labels.shape[0]
-        print("Length of Pseudo Labels: ", size)
-        pseudo_labels = torch.zeros(size, num_class).cuda().scatter_(1, pseudo_labels.view(-1, 1), 1)
-        print("Pseudo Labels: ", pseudo_labels)
-        print("Pseudo Labels Shape: ", pseudo_labels.shape)
-        pseudo_distribution = torch.sum(pseudo_labels, dim=0)
-        print("Pseudo-Label Distribution = ", pseudo_distribution)
 
         # Calculate Weighted Loss on Class Distribution
         # for next epoch's Unsupervised Data
@@ -281,8 +257,7 @@ def main():
         # Use the Sqrt/ cube root of Distribution for the weighting
 
         if (distbLoss == "pseudo") :
-            # distb_u = pseudo_distb_u  # Wrong Counting
-            distb_u = pseudo_distribution # -> Use this instead to update the weighting scheme 
+            distb_u = pseudo_distb_u  
         elif (distbLoss == "output") :
             distb_u = model_distb_u
         else :
@@ -309,20 +284,15 @@ def main():
         # Append logger file
         model_distb_u = model_distb_u.cpu().detach().tolist()
         model_distb_u = [int(p) for p in model_distb_u]
-        # pseudo_distb_u = pseudo_distb_u.cpu().detach().tolist() # Wrong Counting
-        # pseudo_distb_u = [int(p) for p in pseudo_distb_u]     # Wrong Counting
-
-        pseudo_distribution = pseudo_distribution.cpu().detach().tolist()
-        pseudo_distribution = [int(p) for p in pseudo_distribution]
+        pseudo_distb_u = pseudo_distb_u.cpu().detach().tolist()
+        pseudo_distb_u = [int(p) for p in pseudo_distb_u]     
         
         logger.append([train_loss, train_loss_x, train_loss_u, test_loss, test_acc, test_gm])
         outputLogger.append(model_distb_u)
-        # pseudoLogger.append(pseudo_distb_u) # Wrong Counting
-        pseudoLogger.append(pseudo_distbribution)
+        pseudoLogger.append(pseudo_distb_u)
 
         del model_distb_u
-        # del pseudo_distb_u # Wrong Counting
-        del pseudo_distbribution
+        del pseudo_distb_u
 
         # Save models
         save_checkpoint({
@@ -406,7 +376,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
 
             # Update the saved predictions with current one
             pseudo_orig[idx_u, :] = targets_u.data.cpu()
-            pseudo_orig_backup = pseudo_orig.clone()
+            pseudo_orig_backup = pseudo_orig.clone() # torch.Size([11163, 10])
             # print("Checking for DARP")
 
             # Applying DARP
@@ -436,7 +406,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         # A: Fix Match
         max_p, p_hat = torch.max(targets_u, dim=1)      # Choose Class according to Highest Prediction
         p_hat = torch.zeros(batch_size, num_class).cuda().scatter_(1, p_hat.view(-1, 1), 1)
-        p_hat_all = torch.cat([p_hat_all, p_hat], dim=0) # Collect Pseudo-Labels
+        # p_hat_all = torch.cat([p_hat_all, p_hat], dim=0) # Collect Pseudo-Labels # Wrong Collection
 
         # Refer to Fix Match (Supplement B2)
         select_mask = max_p.ge(args.tau)
@@ -459,12 +429,6 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         logits_u = all_outputs[batch_size:] # torch.Size([128, 10])
         output_u_all = torch.cat([output_u_all, logits_u], dim=0)
         # print("logits_u = ", logits_u) # Prediction numbers to be maxed out for one-hot encoding
-
-        # Loss Directly Proportional to Class Distribution
-        # tester = torch.FloatTensor([2,3,2,2,2,2,2,2,3,3]).cuda()
-        # print("Before = ", logits_u)
-        # print("Net = ", logits_u * tester)
-        # weighted_u = logits_u * class_weight_u
 
         # SemiLoss()
         Lx, Lu = criterion(logits_x, all_targets[:batch_size], \
@@ -504,11 +468,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         bar.next()
     bar.finish()
 
-    # To obtain Class Distribution based on Model Prediction
-    # Note: Should use the Pseudo-label Distribution 
-    # instead of Model Prediction Distribution 
-    # (ie logits_u -> targets_u / p_hat)
-    #
+    # Model Class Distribution
     output_u_all = torch.softmax(output_u_all, dim=1)
     values, indices = torch.max(output_u_all, dim=1)
     # indices = indices.cpu()
@@ -524,10 +484,20 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
     print("Distribution (Unsupervised) = ", model_distb_u)
     # # end
 
-    
+    # Pseudo Label Distribution
+    maxValue, pseudo_labels = torch.max(pseudo_orig, dim=1)
 
-    # pseudo_distb_u = torch.sum(p_hat_all, dim=0)
-    # print("Distribution (Pseudo-Label) = ", pseudo_distb_u)
+    if use_cuda :
+        pseudo_labels = pseudo_labels.cuda()
+    
+    size = pseudo_labels.shape[0]
+    pseudo_labels = torch.zeros(size, \
+        num_class).cuda().scatter_(1, pseudo_labels.view(-1, 1), 1) # torch.Size([11163, 10])
+    pseudo_distb_u = torch.sum(pseudo_labels, dim=0)       # torch.Size([10])
+    # # end
+
+    # pseudo_distb_u = torch.sum(p_hat_all, dim=0) # Wrong Count
+    print("Distribution (Pseudo-Label) = ", pseudo_distb_u)
     # print("Shape of Total Unsupervised Outputs =  ", output_u_all) # torch.Size([64000 (128*500), 10])
     
     return (losses.avg, losses_x.avg, losses_u.avg, emp_distb_u, \
