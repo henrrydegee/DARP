@@ -5,7 +5,7 @@
 #########################################
 
 # Variables
-FOLDERNAME="result1"
+FOLDERNAME="test"
 FOLDERDIR="experiments/${FOLDERNAME}"
 SETTINGTXT="${FOLDERDIR}/details.txt"
 PROGRESSTXT="${FOLDERDIR}/progress.txt"
@@ -39,8 +39,18 @@ ITER_T=10
 NUM_ITER=10
 
 # Settings Used for Weighted Loss based on Class Distribution
-W_L="total"
-DISTB="pseudo"
+W_L="--total"   # "--total" to use Total (Class/Total) Weighting Scheme (W_L = [1, CONST+1])
+                # "--minority" to use Minority (Class/Minority) Weighting Scheme (W_L = [1, INF])
+                # "" to use Uniform (Ones) Class Weighting Scheme
+
+CONST=1         # Hyperparameter for W_L Formula (Comment if not using)
+
+DISTB="weak"  # "pseudo" : To use Pseudo-Label Distribution for Weighting Scheme
+                # "weak"   : To use Weakly Augmented Output Distribution for Weighting Scheme
+                # "strong" : To use Strongly Augmented Output Distribution for Weighting Scheme
+
+INV="--invert"  # "--invert" : To flip class weights on Loss (Penalize Minority more than Majority)
+                # "" : To leave class weights to original on Loss (Penalize Majority more than Minority)
 
 # For More Info: Execute "python3 train_fix.py --help"
 
@@ -100,16 +110,27 @@ echo -e \
 "Number of iteration (T) for DARP          = $ITER_T \n \
 Scheduling for updating Pseudo-Labels      = $NUM_ITER \n \
 \n \
-# Settings Used for Weighted Loss based on Class Distribution \n" >> $SETTINGTXT
+# Settings Used for Weighted Loss based on Class Distribution \n \
+CONST = $CONST \n" >> $SETTINGTXT
 
-if [ "$W_L" = "total" ] ; then
+if [ "$INV" == "--invert" ] ; then
+    echo -e "INV = True \n" >> $SETTINGTXT
+elif [ "$INV" == "" ] ; then
+    echo -e "INV = False \n" >> $SETTINGTXT
+else
+    echo -e "Error in INV Setting, Please Correct it. Exiting..." \
+    | tee -a $SETTINGTXT
+    exit 1
+fi
+
+if [ "$W_L" = "--total" ] ; then
     echo -e "Weight Loss Formula Used (Based on Sum Distribution): \n \
-    class_weight_u = distb_u / torch.sum(distb_u) * 2 + 1 \n \
-    Note: class_weight_u = [1, 3] \n" >> $SETTINGTXT
-elif [ "$W_L" = "minority" ] ; then
+    class_weight_u = distb_u / torch.sum(distb_u) * (x = ${CONST}) + 1 \n \
+    Note: class_weight_u = [1, $(expr ${CONST} + 1)] where Hyperparameter x=${CONST} \n" >> $SETTINGTXT
+elif [ "$W_L" = "--minority" ] ; then
     echo -e "Weight Loss Formula Used (Based on Minority Distribution): \n \
-    class_weight_u = (distb_u / lowest_ref) ** (1/3) \n \
-    Note: class_weight_u = [1, inf] \n"  >> $SETTINGTXT
+    class_weight_u = (distb_u / lowest_ref) ** [ 1 / (x = ${CONST}) ] \n \
+    Note: class_weight_u = [1, inf] where Hyperparameter x=${CONST} \n"  >> $SETTINGTXT
 elif [ "$W_L" = "" || "$DISTB" = "" ] ; then
     echo -e "Using Equal Weighting (torch.Ones(num_class))" >> $SETTINGTXT
 else
@@ -118,10 +139,22 @@ else
     exit 1
 fi
 
+if [ "$INV" == "--invert" ] ; then
+    echo -e "2nd Note: Distribution Weighting (distb_u) was flipped \n" >> $SETTINGTXT
+elif [ "$INV" == "" ] ; then
+    echo -e "2nd Note: Distribution Weighting (distb_u) was NOT flipped \n" >> $SETTINGTXT
+else
+    echo -e "Error in INV Setting, Please Correct it. Exiting..." \
+    | tee -a $SETTINGTXT
+    exit 1
+fi
+
 if [ "$DISTB" = "pseudo" ] ; then
-    echo -e "Class Distribution used  = Psuedo-Label (p_hat)" >> $SETTINGTXT
-elif [ "$DISTB" = "output" ] ; then
-    echo -e "Class Distribution used  = Model Prediction (q / y_hat_u)"  >> $SETTINGTXT
+    echo -e "Class Distribution used  = Psuedo-Label (p)" >> $SETTINGTXT
+elif [ "$DISTB" = "weak" ] ; then
+    echo -e "Class Distribution used  = Weakly Augmented Model Prediction (p_hat)"  >> $SETTINGTXT
+elif [ "$DISTB" = "strong" ] ; then
+    echo -e "Class Distribution used  = Strongly Augmented Model Prediction (q)"  >> $SETTINGTXT
 elif [ "$DISTB" = "" || "$W_L" = "" ] ; then
     echo -e "No Class Distribution was used" >> $SETTINGTXT
 else
@@ -159,8 +192,9 @@ $EST \
 --iter_T $ITER_T \
 --num_iter $NUM_ITER \
 \
---w_L $W_L \
+$W_L $CONST \
 --distb $DISTB \
+$INV \
 \
 --out $FOLDERDIR \
 \
