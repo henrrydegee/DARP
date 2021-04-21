@@ -14,6 +14,8 @@ by Jaehyung Kim, Youngbum Hur, Sejun Park, Eunho Yang, Sung Ju Hwang, and Jinwoo
 
 ## Scripts
 Please check out `run.sh` for the scripts to run the baseline algorithms and ours (DARP).
+To run fixmatch, checkout [experiment1.sh](https://github.com/henrrydegee/DARP/blob/henrry/experiment1.sh) to configure \
+settings and run FixMatch Experiments
 
 ### Training procedure of DARP 
 Train a network with baseline algorithm, e.g., MixMatch
