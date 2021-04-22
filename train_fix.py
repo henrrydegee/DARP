@@ -79,12 +79,16 @@ parser.add_argument('--num_iter', type=int, default=10, help='Scheduling for upd
 #     \n (default/blank) = Uniform Weight of Ones \
 #     \n total = Class Distribution / Total Class Distribution : [1, 3] \
 #     \n minority = Class Distribution / Minority Class Distribution : [1, inf]') # Old Arugment
-parser.add_argument('--distb', choices=["", "default", "pseudo", "weak", "strong"], \
-    help='Applying Weights to Loss \
+parser.add_argument('--distb', choices=["", "default", "pseudo", \
+    "weak", "strong", "gt", "gt_l", "gt_u"], \
+    help='Applying Weights to Unsupervised Loss \
     \n (default/blank) = Uniform Weight of Ones \
     \n pseudo = Using Pseudo-Label Class Distribution \
-    \m weak = Using Weakly Augmented Output Class Distribution \
-    \n strong = Using Strongly Augmented Output Class Distribution ')
+    \n weak = Using Weakly Augmented Output Class Distribution \
+    \n strong = Using Strongly Augmented Output Class Distribution \
+    \n gt = Using Ground Truth Class Distribution (Labeled + Unlabeled) \
+    \n gt_l = Using Ground Truth Class Distribution (Labeled) \
+    \n gt_u = Using Ground Truth Class Distribution (Unlabeled)') 
 parser.add_argument('--total', default=None, type=float, \
      help='Using Total-Schemed Weights to Unsupervised Loss (Class/Total)')
 parser.add_argument('--minority', default=None, type=float, \
@@ -116,9 +120,11 @@ def main():
     # Data
     print(f'==> Preparing imbalanced CIFAR-10')
 
-    N_SAMPLES_PER_CLASS = make_imb_data(args.num_max, num_class, args.imb_ratio_l)
-    U_SAMPLES_PER_CLASS = make_imb_data(args.ratio * args.num_max, num_class, args.imb_ratio_u)
+    N_SAMPLES_PER_CLASS = make_imb_data(args.num_max, num_class, args.imb_ratio_l)  # ground_truth labeled
+    U_SAMPLES_PER_CLASS = make_imb_data(args.ratio * args.num_max, num_class, args.imb_ratio_u) # ground truth unlabeled
     N_SAMPLES_PER_CLASS_T = torch.Tensor(N_SAMPLES_PER_CLASS)
+    
+    distb_dict_u = gtDict(N_SAMPLES_PER_CLASS_T, U_SAMPLES_PER_CLASS, use_cuda) # Collect Ground Truth Distribution
 
     train_labeled_set, train_unlabeled_set, test_set = dataset.get_cifar10('/root/data', N_SAMPLES_PER_CLASS,
                                                                                     U_SAMPLES_PER_CLASS)
@@ -167,10 +173,7 @@ def main():
                 weightLoss = loadCheckpoint(args.resume, model, ema_model, optimizer)
 
         printSettings(start_epoch, distbLoss, weightLoss)
-
-        # Load Logger
-        logger, pseudoLogger, darpLogger, \
-            weakLogger, strongLogger = loadLogger(args.out, title)
+        loggerDict = loadLogger(args.out, title)
 
     else:
         # Settings for Weighted loss based on Class Distribution (for Unsupervised)
@@ -179,10 +182,7 @@ def main():
                         total=args.total, minority=args.minority, invert=args.invert)
         
         printSettings(start_epoch, distbLoss, weightLoss)
-
-        # Create Logger
-        logger, pseudoLogger, darpLogger,\
-            weakLogger, strongLogger = createLogger(args.out, title)
+        loggerDict = createLogger(args.out, title)
 
 
     test_accs = []
@@ -213,20 +213,18 @@ def main():
         # In case of FixMatch, labeled data is utilized as unlabeled data once again.
         target_disb += N_SAMPLES_PER_CLASS_T
 
-        # print("Target Distribution = ", target_disb)
-
-        # Training part
         train_loss, train_loss_x, train_loss_u, \
             emp_distb_u, pseudo_orig, pseudo_refine, \
-                pseudo_distb_u, darp_distb_u, weak_distb_u, strong_distb_u = train(labeled_trainloader,
-                                                                               unlabeled_trainloader,
-                                                                                model, optimizer,
-                                                                                ema_optimizer,
-                                                                                train_criterion,
-                                                                                epoch, use_cuda,
-                                                                                target_disb, emp_distb_u,
-                                                                                pseudo_orig, pseudo_refine,
-                                                                                lambda_u, class_weight_u)
+                distb_dict_u["pseudo"], distb_dict_u["darp"], \
+                     distb_dict_u["weak"], distb_dict_u["strong"] = train(labeled_trainloader,
+                                                                           unlabeled_trainloader,
+                                                                            model, optimizer,
+                                                                            ema_optimizer,
+                                                                            train_criterion,
+                                                                            epoch, use_cuda,
+                                                                            target_disb, emp_distb_u,
+                                                                            pseudo_orig, pseudo_refine,
+                                                                            lambda_u, class_weight_u)
 
         # Evaluation part
         test_loss, test_acc, test_cls, test_gm = validate(test_loader, ema_model, criterion, use_cuda, mode='Test Stats ')
@@ -237,8 +235,7 @@ def main():
         # print("Pseudo_Original Shape = ", pseudo_orig.shape) # torch.Size([11163, 10]) # This is fine
         # print("Pseudo Refined Shape = ", pseudo_refine.shape) # torch.Size([11163, 10]) # This is fine
 
-        class_weight_u = getClassWeights(distbLoss, weightLoss, epoch, args.darp, \
-            pseudo_distb_u, darp_distb_u, weak_distb_u, strong_distb_u)
+        class_weight_u = getClassWeights(distbLoss, weightLoss, epoch, args.darp, distb_dict_u)
         print("Weights = ", class_weight_u)
 
         # For Next Epoch (beta)
@@ -247,15 +244,7 @@ def main():
 
         # Append logger file
         stats = [train_loss, train_loss_x, train_loss_u, test_loss, test_acc, test_gm]
-        logger, pseudoLogger, darpLogger, weakLogger, strongLogger = appendLogger(stats, pseudo_distb_u, darp_distb_u, weak_distb_u, \
-            strong_distb_u, logger, pseudoLogger, darpLogger, \
-                weakLogger, strongLogger, printer=True)
-
-        # Remove Distributions
-        del pseudo_distb_u
-        del darp_distb_u
-        del weak_distb_u
-        del strong_distb_u
+        loggerDict = appendLogger(stats, distb_dict_u, loggerDict, printer=True)
 
         # Save models
         save_checkpoint({
@@ -270,11 +259,7 @@ def main():
         test_accs.append(test_acc)
         test_gms.append(test_gm)
 
-    logger.close()
-    pseudoLogger.close()
-    darpLogger.close()
-    weakLogger.close()
-    strongLogger.close()
+    closeLogger(loggerDict)
 
     # Print the final results
     print('Mean bAcc:')
@@ -612,11 +597,9 @@ class SemiLoss(object):
     def __call__(self, outputs_x, targets_x, outputs_u, targets_u, mask, weights_u):
         Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
 
-        CE_u = F.log_softmax(outputs_u, dim=1) * targets_u # Cross-Entropy Unsupervised, torch.Size([128, 10]
-        # print("CE_u shape = ", CE_u.shape)
+        CE_u = F.log_softmax(outputs_u, dim=1) * targets_u # Cross-Entropy Unsupervised, torch.Size([128, 10])
         WCE_u = CE_u * weights_u     # Weighted Cross-Entropy
         MCE_u = torch.sum(WCE_u, dim=1) * mask     # Masked Cross-Entropy based on Quality, torch.Size([128])
-        # print("Before Average Shape = ", MCE_u.shape) # 
         Lu = -torch.mean(MCE_u)     # Final Unsupervised Cross-Entropy Loss
 
         return Lx, Lu
@@ -731,8 +714,9 @@ def prob2Distribution(confidence, use_cuda):
 
     return classDistribution
 
-def getClassWeights(distbLoss, weightLoss, epoch, darp, \
-    pseudo_distb_u, darp_distb_u, weak_distb_u, strong_distb_u) :
+# def getClassWeights(distbLoss, weightLoss, epoch, darp, \
+    # pseudo_distb_u, darp_distb_u, weak_distb_u, strong_distb_u) :
+def getClassWeights(distbLoss, weightLoss, epoch, darp, distb_dict_u) :
     '''
     Calculate Class Weighted Loss on Class Distribution
     for next epoch's Unsupervised Data
@@ -742,34 +726,29 @@ def getClassWeights(distbLoss, weightLoss, epoch, darp, \
     - Also contains inversion if needed
     '''
 
-    if (distbLoss == "pseudo") :
-        distb_u = pseudo_distb_u
-        if darp and epoch > args.warm:
-            distb_u = darp_distb_u  
-    elif (distbLoss == "weak") :
-        distb_u = weak_distb_u
-    elif (distbLoss == "strong") :
-        distb_u = strong_distb_u
-    else :
+    try :
+        # Note: distbLoss does not have "darp" as an option
+        distb_u = distb_dict_u[distbLoss]  
+        print("Distribution Used: ", distb_u)
+        print("distb_dict = ", distb_dict_u)
+        if (distbLoss == "pseudo") and darp and (epoch > args.warm) :
+            distb_u = distb_dict_u["darp"]
+            print("DARPed: ", distb_u)
+    except :
         weightLoss = None
 
     try :
         if (weightLoss["invert?"]) :
             distb_u = torch.flip(distb_u, dims=[0]) # Reverse the order of the Class's Weights
-            print("invert? ", weightLoss["invert?"])
         if (weightLoss["type"] == "total") :
             # Based on Proportion to Sum of all Dataset
             class_weight_u = distb_u / torch.sum(distb_u) * weightLoss["const"] + 1 
-            print("total")
         elif (weightLoss["type"] == "minority") :
             lowest_ref = torch.min(distb_u)
-            print("Before: ", lowest_ref)
             if (lowest_ref < 1) :
                 lowest_ref = 1
-            print("After: ", lowest_ref)
             # Based on Proportion to Lowest Minority Class (Smallest = 1)
-            class_weight_u = (distb_u / lowest_ref) ** (1/weightLoss["const"]) 
-            print("minority")
+            class_weight_u = (distb_u / lowest_ref) ** (1/weightLoss["const"])
     except :
         class_weight_u = torch.ones(num_class)
         if use_cuda :
@@ -779,50 +758,51 @@ def getClassWeights(distbLoss, weightLoss, epoch, darp, \
 
 def createLogger(path, title="") :
     print("Creating Logger File at: ", path+'/log.txt')
-    logger = Logger(os.path.join(path, 'log.txt'), title=title)
-    logger.set_names(['Train Loss', 'Train Loss X', 'Train Loss U',  \
+
+    loggerDict = {}
+    loggerDict["logger"] = Logger(os.path.join(path, 'log.txt'), title=title)
+    loggerDict["logger"].set_names(['Train Loss', 'Train Loss X', 'Train Loss U',  \
             'Test Loss', 'Test Acc.', 'Test GM.'])
 
-    pseudoLogger = Logger(os.path.join(path, 'pseudo_distb.txt'), title=title)
-    pseudoLogger.set_names(['0-Major', '1', '2', '3', '4', '5', \
+    loggerDict["pseudo"] = Logger(os.path.join(path, 'pseudo_distb.txt'), title=title)
+    loggerDict["pseudo"].set_names(['0-Major', '1', '2', '3', '4', '5', \
         '6', '7', '8', '9-Minor'])
-    darpLogger = Logger(os.path.join(path, 'darp_distb.txt'), title=title)
-    darpLogger.set_names(['0-Major', '1', '2', '3', '4', '5', \
+    loggerDict["darp"] = Logger(os.path.join(path, 'darp_distb.txt'), title=title)
+    loggerDict["darp"].set_names(['0-Major', '1', '2', '3', '4', '5', \
         '6', '7', '8', '9-Minor'])
-    weakLogger = Logger(os.path.join(path, 'weak_distb.txt'), title=title)
-    weakLogger.set_names(['0-Major', '1', '2', '3', '4', '5', \
+    loggerDict["weak"] = Logger(os.path.join(path, 'weak_distb.txt'), title=title)
+    loggerDict["weak"].set_names(['0-Major', '1', '2', '3', '4', '5', \
         '6', '7', '8', '9-Minor'])
-    strongLogger = Logger(os.path.join(path, 'strong_distb.txt'), title=title)
-    strongLogger.set_names(['0-Major', '1', '2', '3', '4', '5', \
+    loggerDict["strong"] = Logger(os.path.join(path, 'strong_distb.txt'), title=title)
+    loggerDict["strong"].set_names(['0-Major', '1', '2', '3', '4', '5', \
         '6', '7', '8', '9-Minor'])
 
-    return logger, pseudoLogger, darpLogger, weakLogger, strongLogger
+    return loggerDict
 
 def loadLogger(path, title="") :
-    logger = Logger(os.path.join(path, 'log.txt'), title=title, resume=True)
-    pseudoLogger = Logger(os.path.join(path, 'pseudo_distb.txt'), \
+    loggerDict = {}
+    loggerDict["logger"] = Logger(os.path.join(path, 'log.txt'), title=title, resume=True)
+    loggerDict["pseudo"] = Logger(os.path.join(path, 'pseudo_distb.txt'), \
         title=title+" Pseudo-Label (p) (no DARP) Distribution", resume=True)
-    darpLogger = Logger(os.path.join(path, 'darp_distb.txt'), \
+    loggerDict["darp"] = Logger(os.path.join(path, 'darp_distb.txt'), \
         title=title+" Pseudo-Label (p) (w/ DARP) Distribution", resume=True)
-    weakLogger = Logger(os.path.join(path, 'weak_distb.txt'), \
+    loggerDict["weak"] = Logger(os.path.join(path, 'weak_distb.txt'), \
         title=title+" Weakly Augmented Output (p_hat) Distribution", resume=True)
-    strongLogger = Logger(os.path.join(path, 'strong_distb.txt'), \
+    loggerDict["strong"] = Logger(os.path.join(path, 'strong_distb.txt'), \
         title=title+" Strongly Augmented Prediction (q) Distribution", resume=True)
 
-    return logger, pseudoLogger, darpLogger, weakLogger, strongLogger
+    # return logger, pseudoLogger, darpLogger, weakLogger, strongLogger
+    return loggerDict
 
-def appendLogger(stats, pseudo_distb_u, darp_distb_u, weak_distb_u, \
-        strong_distb_u, logger, pseudoLogger, darpLogger, \
-            weakLogger, strongLogger, printer=False) :
-    
+def appendLogger(stats, distb_dict_u, loggerDict, printer=False) :
     # torch -> list
-    pseudo_distb_u = pseudo_distb_u.cpu().detach().tolist()
+    pseudo_distb_u = distb_dict_u["pseudo"].cpu().detach().tolist()
     pseudo_distb_u = [int(p) for p in pseudo_distb_u]
-    darp_distb_u = darp_distb_u.cpu().detach().tolist()
+    darp_distb_u = distb_dict_u["darp"].detach().tolist()
     darp_distb_u = [int(p) for p in darp_distb_u] 
-    weak_distb_u = weak_distb_u.cpu().detach().tolist()
+    weak_distb_u = distb_dict_u["weak"].cpu().detach().tolist()
     weak_distb_u = [int(p) for p in weak_distb_u]  
-    strong_distb_u = strong_distb_u.cpu().detach().tolist()
+    strong_distb_u = distb_dict_u["strong"].cpu().detach().tolist()
     strong_distb_u = [int(p) for p in strong_distb_u]
     
     if printer :
@@ -831,13 +811,46 @@ def appendLogger(stats, pseudo_distb_u, darp_distb_u, weak_distb_u, \
         print("Weakly Augmented Distribution (Unsupervised) = ", weak_distb_u)
         print("Strongly Augmented Distribution (Unsupervised) = ", strong_distb_u)
 
-    logger.append(stats)
-    pseudoLogger.append(pseudo_distb_u)
-    darpLogger.append(darp_distb_u)
-    weakLogger.append(weak_distb_u)
-    strongLogger.append(strong_distb_u)
+    loggerDict["logger"].append(stats)
+    loggerDict["pseudo"].append(pseudo_distb_u)
+    loggerDict["darp"].append(darp_distb_u)
+    loggerDict["weak"].append(weak_distb_u)
+    loggerDict["strong"].append(strong_distb_u)
 
-    return logger, pseudoLogger, darpLogger, weakLogger, strongLogger
+    return loggerDict
+
+def closeLogger(loggerDict) :
+    loggerDict["logger"].close()
+    loggerDict["pseudo"].close()
+    loggerDict["darp"].close()
+    loggerDict["weak"].close()
+    loggerDict["strong"].close()
+
+    return loggerDict
+
+def gtDict(labeled, unlabeled, use_cuda) :
+    '''
+    Returns Dictionary containing Class Distributions
+
+    Inputs: 
+        labeled: Labeled Class Distribution (List, NumPy, PyTorch, etc)
+        unlabeled: Unlabeled Class Distribution
+    '''
+    # Collect Ground Truth of Unsupervised Class Distribution 
+    gt_distribution_l = torch.Tensor(labeled)
+    gt_distribution_u = torch.Tensor(unlabeled)
+    if use_cuda :
+        gt_distribution_l = gt_distribution_l.cuda()
+        gt_distribution_u = gt_distribution_u.cuda()
+    
+    gt_distb = gt_distribution_l + gt_distribution_u
+
+    # Dictionary containing Class Distribution
+    distb_dict_u = {"gt"    : gt_distb,
+                    "gt_l"  : gt_distribution_l,
+                    "gt_u"  : gt_distribution_u} 
+
+    return distb_dict_u
 
 
 if __name__ == '__main__':

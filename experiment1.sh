@@ -48,6 +48,9 @@ CONST=1         # Hyperparameter for W_L Formula (Comment if not using)
 DISTB="weak"  # "pseudo" : To use Pseudo-Label Distribution for Weighting Scheme
                 # "weak"   : To use Weakly Augmented Output Distribution for Weighting Scheme
                 # "strong" : To use Strongly Augmented Output Distribution for Weighting Scheme
+                # "gt"     : To use Ground Truth (All) Class Distribution for Weighting Scheme (For Justification)
+                # "gt_l"   : To use Ground Truth (Labeled) Class Distribution for Weighting Scheme (For Justification)
+                # "gt_u"   : To use Ground Truth (UnLabeled) Class Distribution for Weighting Scheme (For Justification)
 
 INV="--invert"  # "--invert" : To flip class weights on Loss (Penalize Minority more than Majority)
                 # "" : To leave class weights to original on Loss (Penalize Majority more than Minority)
@@ -155,6 +158,12 @@ elif [ "$DISTB" = "weak" ] ; then
     echo -e "Class Distribution used  = Weakly Augmented Model Prediction (p_hat)"  >> $SETTINGTXT
 elif [ "$DISTB" = "strong" ] ; then
     echo -e "Class Distribution used  = Strongly Augmented Model Prediction (q)"  >> $SETTINGTXT
+elif [ "$DISTB" = "gt" ] ; then
+    echo -e "Class Distribution used  = Ground Truth Distribution (Labeled + Unlabeled)"  >> $SETTINGTXT
+elif [ "$DISTB" = "gt_l" ] ; then
+    echo -e "Class Distribution used  = Ground Truth Distribution (Labeled)"  >> $SETTINGTXT
+elif [ "$DISTB" = "gt_u" ] ; then
+    echo -e "Class Distribution used  = Ground Truth Distribution (Unlabeled)"  >> $SETTINGTXT
 elif [ "$DISTB" = "" || "$W_L" = "" ] ; then
     echo -e "No Class Distribution was used" >> $SETTINGTXT
 else
